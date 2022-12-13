@@ -22,12 +22,42 @@ int ht_init(){
     }
 
     ht->items = calloc(HT_CAPACITY, sizeof(hash_item_t *));
-
+    
     if(ht->items == NULL){
         return -1;
     }
     ht->capacity = HT_CAPACITY;
     ht->user = (void *)malloc(sizeof(struct user_ht));
+    return 0;
+}
+
+int handle_errors(int socket, int res){
+    switch(res){
+        
+        case 1:
+            send_response(socket, KEY_ERROR, 0, NULL);
+            break;
+        
+        case 2:
+            send_response(socket, PARSING_ERROR, 0, NULL);
+            break;
+        
+        case 3:
+            send_response(socket, STORE_ERROR, 0, NULL);
+            break;
+        
+        case 4:
+            send_response(socket, SETOPT_ERROR, 0, NULL);
+            break;
+        
+        case 5:
+            send_response(socket, UNK_ERROR, 0, NULL);
+            break;  
+        
+        default:
+            pr_info("undefined error code");
+    }
+
     return 0;
 }
 
@@ -49,19 +79,11 @@ int del_request(int socket, struct request *request){
     }
 
     if(item == NULL){
-        send_response(socket, KEY_ERROR, 0, NULL);
         request->connection_close = 1;
-        return -1;   
+        return 1;   
     }
 
-
-    // if(item->next != NULL){
-    //     e = item->next;
-    // }
-
-    // if(item->prev != NULL){
-    //     item->prev->next = NULL;
-    // }
+    // trylock
 
     hash_item_t *temp = NULL;
 
@@ -93,9 +115,10 @@ int del_request(int socket, struct request *request){
         ht->items[h] = NULL;
     }
 
-    
-
+    // destroy mutex
+    // unlock
     send_response(socket, OK, 0, NULL);
+
     return 0;
 }
 
@@ -117,17 +140,21 @@ int get_request(int socket, struct request *request){
     }
 
     if(item == NULL){
-        send_response(socket, KEY_ERROR, 0, NULL);
         request->connection_close = 1;
-        return -1;   
+        return 1;   
     }
 
+    // trylock
+
     unsigned int res_size = item->value_size;
-    char *resbuf = malloc(res_size);
+    char *resbuf = malloc(res_size+1);
 
     memcpy(resbuf, item->value, res_size);
-    send_response(socket, OK, res_size, resbuf);
 
+    // unlock 
+
+    strcpy(resbuf+res_size, "\0");
+    send_response(socket, OK, res_size, resbuf);
 
     return 0;
 }
@@ -136,6 +163,7 @@ int set_request(int socket, struct request *request)
 {
     size_t len = 0;
     size_t expected_len = request->msg_len;
+    // int was_empty = 0;
     
     hash_item_t *item = NULL;
     char *key = request->key;
@@ -152,7 +180,6 @@ int set_request(int socket, struct request *request)
             break;
         }
         e = e->next;
-        pr_info("next bucket");
     }
 
     if(item == NULL){
@@ -163,18 +190,53 @@ int set_request(int socket, struct request *request)
         new_item->prev = NULL;
         new_item->value = NULL;
         new_item->value_size = 0;
+        
         new_item->next = ht->items[h];
 
         if(ht->items[h] != NULL){
+
+            if(pthread_mutex_trylock(&ht->items[h]->user->mutex) != 0){
+                pr_info("1lock error");
+                request->connection_close = 1;
+                return 1;
+            }
+            
             ht->items[h]->prev = new_item;
+            ht->items[h] = new_item;
         }
+        
+        if(ht->items[h] == NULL){
 
-        // ht->items[h] = new_item;
-
+            ht->items[h] = new_item;
+            
+        }
+            
         new_item->key = malloc(strlen(key) + 1);
         strcpy(new_item->key, key);
         item = new_item;
+
+        if(pthread_mutex_init(&new_item->user->mutex, NULL) != 0){
+            pr_info("init error");
+            request->connection_close = 1;
+            return 3;
+        }
+
+        if(pthread_mutex_trylock(&new_item->user->mutex) != 0){
+            pr_info("2lock error");
+            request->connection_close = 1;
+            return 1;
+        }    
+   
     }
+    else {
+        if(pthread_mutex_trylock(&item->user->mutex) != 0){
+            pr_info("3lock error");
+            request->connection_close = 1;
+            return 1;
+        }
+    }
+
+
 
     while (len < expected_len){
 
@@ -184,17 +246,16 @@ int set_request(int socket, struct request *request)
         // Note: Clients may send a partial chunk of the payload so you should not wait
         // for the full data to be available before write in the hashtable entry.
 
-        //pr_info("Start reading %zu bytes", expected_len);
+        pr_info("Start reading %zu bytes", expected_len);
         int chunk_size = expected_len;
         int rcved = read_payload(socket, request, chunk_size, rcvbuf);
 
         if(rcved != chunk_size){
-            send_response(socket, STORE_ERROR, 0, NULL);
             request->connection_close = 1;
-            return -1;
+            return 3;
         }
 
-        //pr_info("I am reading  %zu / %s\n", expected_len, rcvbuf);
+        pr_info("I read %zu bytes", expected_len);
         len+=rcved;
 
         if(item->value == NULL && item->value_size == 0){
@@ -210,39 +271,55 @@ int set_request(int socket, struct request *request)
             item->value = malloc(expected_len+1);
 
             if(item->value == NULL){
-                send_response(socket, STORE_ERROR, 0, NULL);
                 request->connection_close = 1;
                 pr_info("Overwrite failed");
-                return -1;
+                return 3;
             }
             item->value[expected_len] = '\0';
         }
             memcpy(item->value, rcvbuf, expected_len);
             item->value_size = expected_len;
-
-        // 3. Write the partial payload on the entry
+            
     }
+
+    // 3. Write the partial payload on the entry
 
     // 4. Unlock the entry in the store to finalize the insertion.
     // This allow other threads to read the entry.
 
     // It checks if the payload has been fully received .
     // It also reads the last char of the request which should be '\n'
-    check_payload(socket, request, expected_len);
-    send_response(socket, OK, 0, NULL);
-    ht->items[h] = item;    
+    if(check_payload(socket, request, expected_len) != 0){
+        request->connection_close = 1;
+
+        if(pthread_mutex_unlock(&ht->items[h]->user->mutex) != 0){
+            pr_info("1unlock error");  
+        }
+
+        return 3;
+    }
+    else {
+
+        ht->items[h] = item;
+        
+        if(pthread_mutex_unlock(&ht->items[h]->user->mutex) != 0){
+            pr_info("2unlock error"); 
+            return 3;   
+        }
+        
+    }
 
     pr_info("set return");
 
     // Optionally you can close the connection
     // You should do it ONLY on errors:
     // request->connection_close = 1;
-    return len;
+    send_response(socket, OK, 0, NULL);
+    return 0;
 }
 
 void *main_job(void *arg)
 {   
-    pr_info("new connection thread\n");
     int method;
    
     struct conn_info *conn_info = arg;
@@ -253,26 +330,40 @@ void *main_job(void *arg)
         inet_ntoa(conn_info->addr.sin_addr),
         ntohs(conn_info->addr.sin_port));
 
+
+    int res = 5;
     do {
         method = recv_request(conn_info->socket_fd, request);
         // Insert your operations here
         switch (method) {
         case SET:
-            set_request(conn_info->socket_fd, request);
+            res = set_request(conn_info->socket_fd, request);
+            
+            if(res > 0){
+                handle_errors(conn_info->socket_fd, res);
+            }
             break;
         case GET:
-            get_request(conn_info->socket_fd, request);
+            res = get_request(conn_info->socket_fd, request);
+            if(res > 0){
+                handle_errors(conn_info->socket_fd, res);
+            }
             break;
         case DEL:
-            del_request(conn_info->socket_fd, request);
+            res = del_request(conn_info->socket_fd, request);
+            if(res > 0){
+                handle_errors(conn_info->socket_fd, res);
+            }
             break;
         case RST:
             // ./check.py issues a reset request after each test
             // to bring back the hashtable to a known state.
             // Implement your reset command here.
+            res = 0;
             send_response(conn_info->socket_fd, OK, 0, NULL);
             break;
         case STAT:
+            res = 0;
             break;
         }
 
@@ -331,7 +422,7 @@ int main(int argc, char *argv[])
 
     for (;;) {
 
-        pr_info("loopbeg\n");
+        // pr_info("loopbeg\n");
         struct conn_info *conn_info =
             calloc(1, sizeof(struct conn_info));
         if (accept_new_connection(listen_sock, conn_info) < 0) {
@@ -343,8 +434,8 @@ int main(int argc, char *argv[])
         unsigned int index = get_id(threads);
         pthread_create(&threads[index], NULL , main_job, (struct conn_info *)conn_info);
         
-        pr_info("loopend\n");
-        // main_job(conn_info);
+        // pr_info("loopend\n");
+
     }
 
     return 0;
