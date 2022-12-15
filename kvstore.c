@@ -183,37 +183,79 @@ int set_request(int socket, struct request *request)
     // 1. Lock the hashtable entry. Create it if the key is not in the store.
 
     unsigned int h = hash(key) % ht->capacity;
+    pr_info("bucket i: %u\n", h);
     hash_item_t *e = ht->items[h];
 
     //Find the item
     while (e!=NULL){
         if(strcmp(e->key, key) == 0){
             item = e;
-            pr_info("Found key ");
+            pr_info("Found key %s\n", key);
             break;
         }
         e = e->next;
     }
 
-    if(ht->items[h] == NULL){
-        pr_info("bucket is null\n");
-    }
-
     if(item == NULL){
-        pr_info("Start making new\n");
+        pr_info("Create new \n");
 
         hash_item_t *new_item = malloc(sizeof(hash_item_t));
         new_item->user = (void *)malloc(sizeof(struct user_item));
+        //IMO PREV IS NULL
         new_item->prev = NULL;
         new_item->value = NULL;
         new_item->value_size = 0;
         
+        //NOTE: Next will not be always the head, in case of a new 
+        // insertion after an insertion, ->next will be the last insertion
+
         new_item->next = ht->items[h];
 
         if(ht->items[h] != NULL){
+    
+            // NEW AND NOT FIRST
 
-            if(pthread_mutex_trylock(&ht->items[h]->user->mutex) != 0){
-                pr_info("1lock error");
+            pr_info(" insert in bucket\n");
+            
+            if(ht->items[h]->prev == NULL){
+                
+                pr_info("init prev mutex\n");
+                ht->items[h]->prev = malloc(sizeof(hash_item_t));
+                ht->items[h]->prev->user = (void *)malloc(sizeof(struct user_item));
+
+                if(pthread_mutex_init(&ht->items[h]->prev->user->mutex, NULL) != 0){
+                    pr_info("init error2");
+                    return 3;
+                }
+   
+            }
+            else {
+                // TODO: INSERTION AFTER INSERTION
+
+                e = ht->items[h]->prev;
+                hash_item_t *temp = e;
+
+                while (e!=NULL){
+                    if(e->prev == NULL){
+                        temp = e;
+                        pr_info("Found correct insertion\n");
+                        break;
+                    }
+                    e = e->prev;
+                }
+
+                temp->prev = malloc(sizeof(hash_item_t));
+                temp->prev->user = (void *)malloc(sizeof(struct user_item));
+
+                if(pthread_mutex_init(&ht->items[h]->prev->user->mutex, NULL) != 0){
+                    pr_info("init error2");
+                    return 3;
+                }
+                
+            }
+
+            if(pthread_mutex_trylock(&ht->items[h]->prev->user->mutex) != 0){
+                pr_info("1lock error %p\n", &ht->items[h]->prev->user->mutex);
                 // pthread_cond_wait(&item->user->cond_var, &item->user->mutex);
                 read_payload(socket, request, chunk_size, rcvbuf);
                 if(check_payload(socket, request, expected_len) != 0){
@@ -223,18 +265,19 @@ int set_request(int socket, struct request *request)
                 return 1;
             }
             else {
-                pr_info("1mutex: %p locked\n", &ht->items[h]->user->mutex);
+                pr_info("1mutex: %p locked\n", &ht->items[h]->prev->user->mutex);
             }
             
-            ht->items[h]->prev = new_item;
+            ht->items[h]->prev->key = new_item->key;
         }
         else {
-            // NEW CODE
-            pr_info("bucket is null2\n");
+            // NEW AND FIRST
+            pr_info(" first in bucket\n");
             ht->items[h] = malloc(sizeof(hash_item_t));
             ht->items[h]->user = (void *)malloc(sizeof(struct user_item));
             ht->items[h]->prev = NULL;
             ht->items[h]->next = NULL;
+            
             ht->items[h]->value = NULL;
             ht->items[h]->value_size = 0;
                         
@@ -244,7 +287,7 @@ int set_request(int socket, struct request *request)
             }
 
             if(pthread_mutex_trylock(&ht->items[h]->user->mutex) != 0){
-                pr_info("2lock error");
+                pr_info("2lock error %p\n", &ht->items[h]->user->mutex);
                 // pthread_cond_wait(&item->user->cond_var, &item->user->mutex);
                 read_payload(socket, request, chunk_size, rcvbuf);
                 if(check_payload(socket, request, expected_len) != 0){
@@ -257,22 +300,27 @@ int set_request(int socket, struct request *request)
                 pr_info("2mutex: %p locked\n", &ht->items[h]->user->mutex);
             }
 
+            ht->items[h]->key = malloc(strlen(key) + 1);
+            strcpy(ht->items[h]->key, key);
         }
             
         new_item->key = malloc(strlen(key) + 1);
         strcpy(new_item->key, key);
-        ht->items[h]->key = new_item->key;
         item = new_item;
-        
-        // if(pthread_cond_init(&new_item->user->cond_var, NULL) != 0){
-        //     pr_info("init error");
-        //     return 3;
-        // }
 
     }
     else {
+        pr_info("Overwrite \n");
+
+        if(ht->items[h] == NULL){
+            pr_info(" head\n");
+        }
+        else {
+            pr_info(" not head\n");
+        }
+        
         if(pthread_mutex_trylock(&ht->items[h]->user->mutex) != 0){
-            pr_info("3lock error");
+            pr_info("3lock error %p\n", &ht->items[h]->user->mutex);
             // pthread_cond_wait(&item->user->cond_var, &item->user->mutex);
             read_payload(socket, request, chunk_size, rcvbuf);
             if(check_payload(socket, request, expected_len) != 0){
@@ -304,18 +352,18 @@ int set_request(int socket, struct request *request)
         if(rcved != chunk_size){
             // UNLOCK
 
-            if(pthread_mutex_unlock(&item->user->mutex) != 0){
-                pr_info("1unlock error");  
+            if(pthread_mutex_unlock(&ht->items[h]->user->mutex) != 0){
+                pr_info("1unlock error \n%p", &ht->items[h]->user->mutex);  
             }
             else {
-                pr_info("1mutex: %p unlocked", &item->user->mutex);
+                pr_info("1mutex: %p unlocked\n", &ht->items[h]->user->mutex);
             }
 
             // pthread_cond_broadcast(&item->user->cond_var, &item->user->mutex);
             return 3;
         }
 
-        pr_info("I read %zu / %i bytes", expected_len, rcved);
+        pr_info("I read %zu / %i bytes\n", expected_len, rcved);
         len+=rcved;
 
         if(item->value == NULL && item->value_size == 0){
@@ -333,14 +381,14 @@ int set_request(int socket, struct request *request)
             if(item->value == NULL){
 
                 // UNLOCK
-                if(pthread_mutex_unlock(&item->user->mutex) != 0){
-                    pr_info("2unlock error");  
+                if(pthread_mutex_unlock(&ht->items[h]->user->mutex) != 0){
+                    pr_info("2unlock error \n%p", &ht->items[h]->user->mutex);  
                 }
                 else {
-                    pr_info("2mutex: %p unlocked", &item->user->mutex);
+                    pr_info("2mutex: %p unlocked\n", &ht->items[h]->user->mutex);
                     // pthread_cond_broadcast(&item->user->cond_var);
                 }
-                pr_info("Overwrite failed");
+                pr_info("Overwrite failed\n");
                 return 3;
             }
             item->value[expected_len] = '\0';
@@ -358,35 +406,67 @@ int set_request(int socket, struct request *request)
     // It checks if the payload has been fully received .
     // It also reads the last char of the request which should be '\n'
     if(check_payload(socket, request, expected_len) != 0){
-
-        // CHANGED HT->ITEMS[H] TO ITEM 
         
-        if(pthread_mutex_unlock(&item->user->mutex) != 0){
-            pr_info("3unlock error %p", &item->user->mutex);  
+        if(pthread_mutex_unlock(&ht->items[h]->user->mutex) != 0){
+            pr_info("3unlock error %p\n", &ht->items[h]->user->mutex);  
         }
         else {
-            pr_info("3mutex: %p unlocked", &item->user->mutex);
+            pr_info("3mutex: %p unlocked\n", &ht->items[h]->user->mutex);
         }
 
         return 3;
     }
-    else {
+    
         
-        // maybe assign everything apart from the user
-        // so that the user remains untouched, and the mutex within
+    // maybe assign everything apart from the user
+    // so that the user remains untouched, and the mutex within
+    
+    if(strcmp(ht->items[h]->key, key) == 0){
+        
+        pr_info("Insert to head\n");
         ht->items[h]->value = item->value;
         ht->items[h]->value_size = item->value_size;
         
         if(pthread_mutex_unlock(&ht->items[h]->user->mutex) != 0){
-            pr_info("4unlock error %p", &ht->items[h]->user->mutex); 
+            pr_info("4unlock error %p\n", &ht->items[h]->user->mutex); 
             
             return 3;   
         }
         else {
-            pr_info("4mutex: %p unlocked", &ht->items[h]->user->mutex);
+            pr_info("4mutex: %p unlocked\n", &ht->items[h]->user->mutex);
+        }
+    }
+    else {
+
+        e = ht->items[h]->prev;
+        hash_item_t *temp = e;
+        
+        while (e!=NULL){
+            if(strcmp(e->key, key) == 0){
+                temp = e;
+                pr_info("Found key again\n");
+                break;
+            }
+            e = e->next;
         }
         
+        pr_info("Insert to not head\n");
+        pthread_mutex_t *mutex_ptr = &temp->user->mutex;
+        temp = item;
+        
+        if(pthread_mutex_unlock(mutex_ptr) != 0){
+            pr_info("5unlock error %p\n", mutex_ptr); 
+            
+            return 3;   
+        }
+        else {
+            pr_info("5mutex: %p unlocked\n", mutex_ptr);
+        }
+        
+
     }
+        
+    
 
     pr_info("set return\n");
 
