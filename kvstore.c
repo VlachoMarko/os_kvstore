@@ -16,7 +16,6 @@
 #define HT_CAPACITY 256
 int used_ids[100] = { };
 
-
 int ht_init(){
     ht = malloc(sizeof(hashtable_t));
 
@@ -97,7 +96,13 @@ int del_request(int socket, struct request *request){
         return 1;   
     }
 
-    // trylock
+    if(pthread_rwlock_trywrlock(&item->user->rwlock) != 0){
+        pr_info("1writelock error %p\n", &item->user->rwlock);
+        return 1;
+    }
+    else {
+        pr_info("1rwlock: %p writelocked\n", &item->user->rwlock);
+    }
 
     hash_item_t *temp = NULL;
 
@@ -129,9 +134,17 @@ int del_request(int socket, struct request *request){
         ht->items[h] = NULL;
     }
 
-    // destroy mutex
-    // unlock
     send_response(socket, OK, 0, NULL);
+    
+    if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
+        pr_info("2unlock error %p\n", &item->user->rwlock); 
+        
+        return 3;   
+    }
+    else {
+        pr_info("2rwlock: %p unlocked\n", &item->user->rwlock);
+    }
+    
 
     return 0;
 }
@@ -153,21 +166,37 @@ int get_request(int socket, struct request *request){
         e = e->next;
     }
 
+    
     if(item == NULL){
         return 1;   
     }
+    
+    if(pthread_rwlock_trywrlock(&item->user->rwlock) != 0){
+        pr_info("1writelock error %p\n", &item->user->rwlock);
+        return 1;
+    }
+    else {
+        pr_info("1rwlock: %p writelocked\n", &item->user->rwlock);
+    }
 
-    // trylock
 
     unsigned int res_size = item->value_size;
     char *resbuf = malloc(res_size+1);
 
     memcpy(resbuf, item->value, res_size);
 
-    // unlock 
-
     strcpy(resbuf+res_size, "\0");
     send_response(socket, OK, res_size, resbuf);
+    
+    if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
+        pr_info("2unlock error %p\n", &item->user->rwlock); 
+        
+        return 3;   
+    }
+    else {
+        pr_info("2rwlock: %p unlocked\n", &item->user->rwlock);
+    }
+
 
     return 0;
 }
@@ -236,8 +265,6 @@ int set_request(int socket, struct request *request)
                 new_item->prev = new_place;
                 new_place->next = new_item;
             }
-        
-            
         }
         else {
             // NEW AND FIRST
@@ -250,16 +277,15 @@ int set_request(int socket, struct request *request)
             ht->items[h]->value_size = 0;
             ht->items[h]->key = malloc(strlen(key) + 1);
 
-            if(pthread_mutex_init(&ht->items[h]->user->mutex, NULL) != 0){
+            if(pthread_rwlock_init(&ht->items[h]->user->rwlock, NULL) != 0){
                 pr_info("init error");
                 return 3;
             }
 
-            pthread_mutex_t *head_mutex = &ht->items[h]->user->mutex;   
+            pthread_rwlock_t *head_rwlock = &ht->items[h]->user->rwlock;   
             
-            if(pthread_mutex_trylock(head_mutex) != 0){
-                pr_info("3lock error %p\n", head_mutex);
-                // pthread_cond_wait(&item->user->cond_var, &item->user->mutex);
+            if(pthread_rwlock_trywrlock(head_rwlock) != 0){
+                pr_info("3writelock error %p\n", head_rwlock);
                 read_payload(socket, request, chunk_size, rcvbuf);
                 if(check_payload(socket, request, expected_len) != 0){
                     pr_info("payload error");
@@ -268,22 +294,23 @@ int set_request(int socket, struct request *request)
                 return 1;
             }
             else {
-                pr_info("3mutex: %p locked\n", head_mutex);
+                pr_info("3rwlock: %p writelocked\n", head_rwlock);
             }
+            
             
             ht->items[h] = new_item;
 
             // unlock old_head
-            if(pthread_mutex_unlock(head_mutex) != 0){
-                pr_info("4unlock error %p\n", head_mutex);  
+            if(pthread_rwlock_unlock(head_rwlock) != 0){
+                pr_info("4unlock error %p\n", head_rwlock);  
             }
             else {
-                pr_info("4mutex: %p unlocked\n", head_mutex);
+                pr_info("4rwlock: %p unlocked\n", head_rwlock);
             }
 
         }
 
-        if(pthread_mutex_init(&new_item->user->mutex, NULL) != 0){
+        if(pthread_rwlock_init(&new_item->user->rwlock, NULL) != 0){
             pr_info("init error");
             return 3;
         }
@@ -299,9 +326,9 @@ int set_request(int socket, struct request *request)
 
     // ITEM SHOULD BE USED INSTEAD OF HT->ITEMS[H]
     
-    if(pthread_mutex_trylock(&item->user->mutex) != 0){
-        pr_info("5lock error %p\n", &item->user->mutex);
-        // pthread_cond_wait(&item->user->cond_var, &item->user->mutex);
+    if(pthread_rwlock_trywrlock(&item->user->rwlock) != 0){
+        pr_info("5lock error %p\n", &item->user->rwlock);
+        // pthread_cond_wait(&item->user->cond_var, &item->user->rwlock);
         read_payload(socket, request, chunk_size, rcvbuf);
         if(check_payload(socket, request, expected_len) != 0){
             pr_info("payload error");
@@ -310,7 +337,7 @@ int set_request(int socket, struct request *request)
         return 1;
     }
     else {
-        pr_info("5mutex: %p locked\n", &item->user->mutex);
+        pr_info("5rwlock: %p locked\n", &item->user->rwlock);
     }
 
 
@@ -348,11 +375,11 @@ int set_request(int socket, struct request *request)
             if(item->value == NULL){
 
                 // UNLOCK
-                if(pthread_mutex_unlock(&item->user->mutex) != 0){
-                    pr_info("7unlock error \n%p", &item->user->mutex);  
+                if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
+                    pr_info("7unlock error \n%p", &item->user->rwlock);  
                 }
                 else {
-                    pr_info("7mutex: %p unlocked\n", &item->user->mutex);
+                    pr_info("7rwlock: %p unlocked\n", &item->user->rwlock);
                     // pthread_cond_broadcast(&item->user->cond_var);
                 }
                 pr_info("Overwrite failed\n");
@@ -374,11 +401,11 @@ int set_request(int socket, struct request *request)
     // It also reads the last char of the request which should be '\n'
     if(check_payload(socket, request, expected_len) != 0){
         
-        if(pthread_mutex_unlock(&item->user->mutex) != 0){
-            pr_info("8unlock error %p\n", &item->user->mutex);  
+        if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
+            pr_info("8unlock error %p\n", &item->user->rwlock);  
         }
         else {
-            pr_info("8mutex: %p unlocked\n", &item->user->mutex);
+            pr_info("8rwlock: %p unlocked\n", &item->user->rwlock);
         }
 
         return 3;
@@ -395,13 +422,13 @@ int set_request(int socket, struct request *request)
         pr_info("no insertion, it is in next\n");
     }
     
-    if(pthread_mutex_unlock(&item->user->mutex) != 0){
-        pr_info("10unlock error %p\n", &item->user->mutex); 
+    if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
+        pr_info("10unlock error %p\n", &item->user->rwlock); 
         
         return 3;   
     }
     else {
-        pr_info("10mutex: %p unlocked\n", &item->user->mutex);
+        pr_info("10rwlock: %p unlocked\n", &item->user->rwlock);
     }
         
     
