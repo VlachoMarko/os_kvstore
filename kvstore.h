@@ -7,8 +7,7 @@
 struct user_item {
     // Add your fields here.
     // You can access this structure from ht_item's user field defined in hash.h
-    pthread_mutex_t mutex;
-    pthread_cond_t cond_var;
+    pthread_rwlock_t rwlock;
 };
 
 struct user_ht {
