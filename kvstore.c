@@ -171,7 +171,7 @@ int get_request(int socket, struct request *request){
         return 1;   
     }
     
-    if(pthread_rwlock_trywrlock(&item->user->rwlock) != 0){
+    if(pthread_rwlock_tryrdlock(&item->user->rwlock) != 0){
         pr_info("1writelock error %p\n", &item->user->rwlock);
         return 1;
     }
