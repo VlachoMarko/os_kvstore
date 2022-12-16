@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include <stdio.h>
 #include <semaphore.h>
 #include <assert.h>
 #include <pthread.h>
@@ -13,6 +15,7 @@
 // You should initialize your hashtable with this capacity.
 #define HT_CAPACITY 256
 int used_ids[100] = { };
+
 
 int ht_init(){
     ht = malloc(sizeof(hashtable_t));
@@ -204,51 +207,48 @@ int set_request(int socket, struct request *request)
         new_item->value = NULL;
         new_item->value_size = 0;
 
+        new_item->key = malloc(strlen(key) + 1);
+        strcpy(new_item->key, key);
+
         
         if(ht->items[h] != NULL){
     
             pr_info("Insert new head, connect old head\n");
 
-
-            if(ht->items[h]->prev == NULL){
-                ht->items[h]->prev = new_item;
+            if(ht->items[h]->next == NULL){
+                new_item->prev = ht->items[h];
+                ht->items[h]->next = new_item;
             }
             else {
-                pthread_mutex_t *head_mutex = &ht->items[h]->prev->user->mutex;
-                
-                if(pthread_mutex_trylock(head_mutex) != 0){
-                    pr_info("1lock error %p\n", head_mutex);
-                    // pthread_cond_wait(&item->user->cond_var, &item->user->mutex);
-                    read_payload(socket, request, chunk_size, rcvbuf);
-                    if(check_payload(socket, request, expected_len) != 0){
-                        pr_info("payload error");
-                        return 2;
+
+                e = ht->items[h]->next;
+                hash_item_t *new_place = e;
+
+                while (e!=NULL){
+                    if(e->next == NULL){
+                        new_place = e;
+                        pr_info("Found place \n");
+                        break;
                     }
-                    return 1;
-                }
-                else {
-                    pr_info("1mutex: %p locked\n", head_mutex);
+                    e = e->next;
                 }
 
-                ht->items[h]->prev = new_item;
-
-                if(pthread_mutex_unlock(head_mutex) != 0){
-                    pr_info("2unlock error \n%p", head_mutex);  
-                }
-                else {
-                    pr_info("2mutex: %p unlocked\n", head_mutex);
-                }
+                new_item->prev = new_place;
+                new_place->next = new_item;
             }
         
-            new_item->next = ht->items[h];
+            
         }
         else {
             // NEW AND FIRST
             pr_info("New head into empty bucket\n"); 
             ht->items[h] = malloc(sizeof(hash_item_t));
             ht->items[h]->user = (void *)malloc(sizeof(struct user_item));
+            ht->items[h]->prev = NULL;
+            ht->items[h]->next = NULL;
             ht->items[h]->value = NULL;
             ht->items[h]->value_size = 0;
+            ht->items[h]->key = malloc(strlen(key) + 1);
 
             if(pthread_mutex_init(&ht->items[h]->user->mutex, NULL) != 0){
                 pr_info("init error");
@@ -272,7 +272,7 @@ int set_request(int socket, struct request *request)
             }
             
             ht->items[h] = new_item;
-            
+
             // unlock old_head
             if(pthread_mutex_unlock(head_mutex) != 0){
                 pr_info("4unlock error %p\n", head_mutex);  
@@ -288,8 +288,6 @@ int set_request(int socket, struct request *request)
             return 3;
         }
 
-        new_item->key = malloc(strlen(key) + 1);
-        strcpy(new_item->key, key);
         item = new_item;
     }
     else {
@@ -392,35 +390,21 @@ int set_request(int socket, struct request *request)
         
         ht->items[h] = item;
 
-        if(pthread_mutex_unlock(&item->user->mutex) != 0){
-            pr_info("10unlock error %p\n", &item->user->mutex); 
-            
-            return 3;   
-        }
-        else {
-            pr_info("10mutex: %p unlocked\n", &item->user->mutex);
-        }
     }
     else {
-
-
-
-        ht->items[h] = item;
-    
-
-        if(pthread_mutex_unlock(&item->user->mutex) != 0){
-            pr_info("13unlock error %p\n", &item->user->mutex);     
-            return 3;   
-        }
-        else {
-            pr_info("13mutex: %p unlocked\n", &item->user->mutex);
-        }        
-
+        pr_info("no insertion, it is in next\n");
     }
     
+    if(pthread_mutex_unlock(&item->user->mutex) != 0){
+        pr_info("10unlock error %p\n", &item->user->mutex); 
+        
+        return 3;   
+    }
+    else {
+        pr_info("10mutex: %p unlocked\n", &item->user->mutex);
+    }
         
     
-
     pr_info("set return\n");
 
     // Optionally you can close the connection
