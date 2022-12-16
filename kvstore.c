@@ -37,12 +37,10 @@ int handle_errors(int socket, struct request *request, int res){
     switch(res){
         
         case 1:
-            pr_info("sending key error\n");
             send_response(socket, KEY_ERROR, 0, NULL);
             break;
         
         case 2:
-            pr_info("sending parsing error\n");
             send_response(socket, PARSING_ERROR, 0, NULL);
             break;
         
@@ -86,7 +84,6 @@ int del_request(int socket, struct request *request){
     while (e!=NULL){
         if(strcmp(e->key, key) == 0){
             item = e;
-            pr_info("Found key ");
             break;
         }
         e = e->next;
@@ -96,53 +93,118 @@ int del_request(int socket, struct request *request){
         return 1;   
     }
 
-    if(pthread_rwlock_trywrlock(&item->user->rwlock) != 0){
-        pr_info("1writelock error %p\n", &item->user->rwlock);
+    pthread_rwlock_t *rwlock_ptr = &item->user->rwlock;
+    if(pthread_rwlock_trywrlock(rwlock_ptr) != 0){
+        pr_info("1readlock error %p\n", rwlock_ptr);
         return 1;
     }
     else {
-        pr_info("1rwlock: %p writelocked\n", &item->user->rwlock);
+        pr_info("1rwlock: %p writelocked\n", rwlock_ptr);
     }
 
-    hash_item_t *temp = NULL;
 
-    if((item->next != NULL && item->prev != NULL) || item->next != NULL){
+    if(item->next != NULL && item->prev != NULL){
 
-        e = item->next;
-        if(item->prev != NULL){
-            item->prev->next = NULL;
+        if(pthread_rwlock_trywrlock(&item->prev->user->rwlock) != 0){
+            pr_info("2writelock error %p\n", &item->prev->user->rwlock);
+            return 1;
+        }
+        else {
+            pr_info("2rwlock: %p writelocked\n", &item->prev->user->rwlock);
         }
 
-        while (e!=NULL){
-            
-            temp = e;
-            temp->next = ht->items[h];
-
-            if(ht->items[h] != NULL){
-                ht->items[h]->prev = temp;
-            }
-
-            ht->items[h] = temp;
-
-            e = e->next;
+        if(pthread_rwlock_trywrlock(&item->next->user->rwlock) != 0){
+            pr_info("3writelock error %p\n", &item->next->user->rwlock);
+            return 1;
         }
+        else {
+            pr_info("3rwlock: %p writelocked\n", &item->next->user->rwlock);
+        }
+
+        hash_item_t *prevItem = item->prev;
+        hash_item_t *nextItem = item->next;
+        
+        prevItem->next = nextItem;
+        nextItem->prev = prevItem;
+
+        if(pthread_rwlock_unlock(&item->next->user->rwlock) != 0){
+            pr_info("4unlock error %p\n", &item->next->user->rwlock); 
+            return 3;   
+        }
+        else {
+            pr_info("4rwlock: %p unlocked\n", &item->next->user->rwlock);
+        }
+        
+        if(pthread_rwlock_unlock(&item->prev->user->rwlock) != 0){
+            pr_info("5unlock error %p\n", &item->prev->user->rwlock); 
+        
+            return 3;   
+        }
+        else {
+            pr_info("5rwlock: %p unlocked\n", &item->prev->user->rwlock);
+        }
+
     }
     else if(item->prev != NULL){
-        item->prev->next = NULL;
+
+        pthread_rwlock_t *rwlock_ptr1 = &item->prev->user->rwlock;
+        
+        if(pthread_rwlock_trywrlock(rwlock_ptr1) != 0){
+            pr_info("6writelock error %p\n", rwlock_ptr1);
+            return 1;
+        }
+        else {
+            pr_info("6rwlock: %p writelocked\n", rwlock_ptr1);
+        }
+
+        hash_item_t *prevItem = item->prev;
+        prevItem->next = NULL;
+
+        if(pthread_rwlock_unlock(rwlock_ptr1) != 0){
+        pr_info("7unlock error %p\n", rwlock_ptr1); 
+        
+        return 3;   
+        }
+        else {
+            pr_info("7rwlock: %p unlocked\n", rwlock_ptr1);
+        }
     }
-    else{
+    else if(item->next != NULL){
+
+        pthread_rwlock_t *rwlock_ptr1 = &item->next->user->rwlock;
+        if(pthread_rwlock_trywrlock(rwlock_ptr1) != 0){
+            pr_info("8writelock error %p\n", rwlock_ptr1);
+            return 1;
+        }
+        else {
+            pr_info("8rwlock: %p writelocked\n", rwlock_ptr1);
+        }
+
+        ht->items[h] = ht->items[h]->next;
+        ht->items[h]->prev = NULL;
+
+        if(pthread_rwlock_unlock(rwlock_ptr1) != 0){
+            pr_info("9unlock error %p\n", rwlock_ptr1); 
+            
+            return 3;   
+        }
+        else {
+            pr_info("9rwlock: %p unlocked\n", rwlock_ptr1);
+        }
+    }
+    else {
         ht->items[h] = NULL;
     }
 
     send_response(socket, OK, 0, NULL);
     
-    if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
-        pr_info("2unlock error %p\n", &item->user->rwlock); 
+    if(pthread_rwlock_unlock(rwlock_ptr) != 0){
+        pr_info("10unlock error %p\n", rwlock_ptr); 
         
         return 3;   
     }
     else {
-        pr_info("2rwlock: %p unlocked\n", &item->user->rwlock);
+        pr_info("10rwlock: %p unlocked\n", rwlock_ptr);
     }
     
 
@@ -160,7 +222,6 @@ int get_request(int socket, struct request *request){
     while (e!=NULL){
         if(strcmp(e->key, key) == 0){
             item = e;
-            pr_info("Found key ");
             break;
         }
         e = e->next;
@@ -220,14 +281,12 @@ int set_request(int socket, struct request *request)
     while (e!=NULL){
         if(strcmp(e->key, key) == 0){
             item = e;
-            pr_info("Found key %s\n", key);
             break;
         }
         e = e->next;
     }
 
     if(item == NULL){
-        pr_info("Create new \n");
 
         hash_item_t *new_item = malloc(sizeof(hash_item_t));
         new_item->user = (void *)malloc(sizeof(struct user_item));
@@ -241,9 +300,6 @@ int set_request(int socket, struct request *request)
 
         
         if(ht->items[h] != NULL){
-    
-            pr_info("Insert new head, connect old head\n");
-
             if(ht->items[h]->next == NULL){
                 new_item->prev = ht->items[h];
                 ht->items[h]->next = new_item;
@@ -256,7 +312,6 @@ int set_request(int socket, struct request *request)
                 while (e!=NULL){
                     if(e->next == NULL){
                         new_place = e;
-                        pr_info("Found place \n");
                         break;
                     }
                     e = e->next;
@@ -267,8 +322,6 @@ int set_request(int socket, struct request *request)
             }
         }
         else {
-            // NEW AND FIRST
-            pr_info("New head into empty bucket\n"); 
             ht->items[h] = malloc(sizeof(hash_item_t));
             ht->items[h]->user = (void *)malloc(sizeof(struct user_item));
             ht->items[h]->prev = NULL;
@@ -287,6 +340,7 @@ int set_request(int socket, struct request *request)
             if(pthread_rwlock_trywrlock(head_rwlock) != 0){
                 pr_info("3writelock error %p\n", head_rwlock);
                 read_payload(socket, request, chunk_size, rcvbuf);
+                
                 if(check_payload(socket, request, expected_len) != 0){
                     pr_info("payload error");
                     return 2;
@@ -300,7 +354,6 @@ int set_request(int socket, struct request *request)
             
             ht->items[h] = new_item;
 
-            // unlock old_head
             if(pthread_rwlock_unlock(head_rwlock) != 0){
                 pr_info("4unlock error %p\n", head_rwlock);  
             }
@@ -317,14 +370,6 @@ int set_request(int socket, struct request *request)
 
         item = new_item;
     }
-    else {
-        // NOTE: Does not matter if it is the head or not, 
-        // we just need the item which was found in the while loop
-        pr_info(" Overwrite item\n");       
-    }
-
-
-    // ITEM SHOULD BE USED INSTEAD OF HT->ITEMS[H]
     
     if(pthread_rwlock_trywrlock(&item->user->rwlock) != 0){
         pr_info("5lock error %p\n", &item->user->rwlock);
@@ -346,50 +391,40 @@ int set_request(int socket, struct request *request)
         // 2. Read the payload from the socket
         // Note: Clients may send a partial chunk of the payload so you should not wait
         // for the full data to be available before write in the hashtable entry.
-
-        pr_info("Start reading %zu bytes\n", expected_len);
-        
+ 
         int rcved = read_payload(socket, request, chunk_size, rcvbuf);
 
-
         if(rcved != chunk_size){
-            pr_info("bad chunk size\n");
+            pr_info("Bad size\n");
             return 3;
         }
 
-        pr_info("I read %zu / %i bytes\n", expected_len, rcved);
         len+=rcved;
 
         if(item->value == NULL && item->value_size == 0){
-            // Set new
-            //pr_info("Setting new");
             item->value = malloc(expected_len+1);
             item->value[expected_len] = '\0';
         }
         else {
-            // Overwrite
-            // pr_info("Overwriting");
             free(item->value);
             item->value = malloc(expected_len+1);
 
             if(item->value == NULL){
 
-                // UNLOCK
                 if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
                     pr_info("7unlock error \n%p", &item->user->rwlock);  
                 }
                 else {
                     pr_info("7rwlock: %p unlocked\n", &item->user->rwlock);
-                    // pthread_cond_broadcast(&item->user->cond_var);
                 }
-                pr_info("Overwrite failed\n");
                 return 3;
             }
+
             item->value[expected_len] = '\0';
         }
+            
             memcpy(item->value, rcvbuf, expected_len);
             item->value_size = expected_len;
-            
     }
 
     // 3. Write the partial payload on the entry
@@ -399,6 +434,7 @@ int set_request(int socket, struct request *request)
 
     // It checks if the payload has been fully received .
     // It also reads the last char of the request which should be '\n'
+    
     if(check_payload(socket, request, expected_len) != 0){
         
         if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
@@ -412,28 +448,18 @@ int set_request(int socket, struct request *request)
     }
         
     if(strcmp(ht->items[h]->key, item->key) == 0){
-        
-        pr_info("Insert to head\n");
-        
+                
         ht->items[h] = item;
-
-    }
-    else {
-        pr_info("no insertion, it is in next\n");
     }
     
     if(pthread_rwlock_unlock(&item->user->rwlock) != 0){
         pr_info("10unlock error %p\n", &item->user->rwlock); 
-        
         return 3;   
     }
     else {
         pr_info("10rwlock: %p unlocked\n", &item->user->rwlock);
     }
         
-    
-    pr_info("set return\n");
-
     // Optionally you can close the connection
     // You should do it ONLY on errors:
     // request->connection_close = 1;
